@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 ########################################################################
 # LIST OF PIP LIBS USED FOR THIS 
-# mini-swe-agent
+# mini-swe-agent (?)
 
 
 ########################################################################################
@@ -74,13 +74,17 @@ def read_multiline():
 # for setting the chat history 
 messages = []
 default_message = {"role": "system", "content": agent_config.SYSTEM_PROMPT_START}
+first_prompt_buffer = None 
 
 # main agentic work loop
-def agentic_work_loop(yolo=False):
+def agentic_work_loop(first=False, yolo=False):
     global messages
+    global first_prompt_buffer
     print(agent_config.ENTER_TEXT)
     user_message = read_multiline()
     messages.append({"role": "user", "content": user_message})
+    if first:
+        first_prompt_buffer = messages[-1]
     while True:
         lm_output = query_lm(messages)
         print("LM output", lm_output)
@@ -117,16 +121,16 @@ def start_annotation_request(yolo=False):
     messages = []
     messages.append(default_message.copy())
     print(agent_config.HOME_TEXT)
-    agentic_work_loop(yolo=yolo)
+    agentic_work_loop(first=True, yolo=yolo)
 
 # starting point for the iteration rounds of annotations
-def iterate_annotation_request(round_num, yolo=False):
-    # TODO -- work on the iterating package methods -- may not be working 100% rn (then work on agentic part)
-
+def iterate_annotation_request(yolo=False):
     global messages
+    global first_prompt_buffer
     messages = []
     messages.append(default_message.copy())
-    messages.append({"role": "user", "content": agent_config.SYSTEM_PROMPT_ITERATE.format(value=round_num)})
+    messages.append(first_prompt_buffer.copy())
+    messages.append({"role": "system", "content": agent_config.SYSTEM_PROMPT_ITERATE})
     print(agent_config.ITER_TEXT)
     agentic_work_loop(yolo=yolo)
 
@@ -135,9 +139,7 @@ def iterate_annotation_request(round_num, yolo=False):
 # Main workflow 
 
 if __name__ == "__main__":
-    round_num = 0
     yolo = False
     start_annotation_request(yolo=yolo)
     while True:
-        round_num += 1
-        iterate_annotation_request(round_num, yolo=yolo)
+        iterate_annotation_request(yolo=yolo)
