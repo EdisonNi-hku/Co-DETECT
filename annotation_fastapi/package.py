@@ -105,7 +105,7 @@ async def annotation_inside_call(request: AnnotationRequest, singular: bool = Fa
 
 # what to call when running annotation results
 # specifically does the annotation call, properly formats the results, and saves/prints them in a readable format 
-def run_annotation(request: AnnotationRequest, out_json_path: str, out_txt_path: str, singular: bool = False, verbose: bool = False) -> dict | None:
+def run_annotation(request: AnnotationRequest, out_json_path: str, out_txt_path: str, singular: bool = False, verbose: bool = False) -> None:
     results = asyncio.run(annotation_inside_call(request, singular=singular, verbose=verbose))
 
     handle_annotation_output(results, request.reannotate_round, out_json_path, out_txt_path, singular=singular, verbose=verbose)
@@ -119,6 +119,14 @@ def run_annotation(request: AnnotationRequest, out_json_path: str, out_txt_path:
 
 ########################################################################
 # POST-ANNOTATION OUTPUT HANDLING FUNCTIONS    
+
+
+def write_to_json(data: dict, output_json_path: str, msg: str = "Results saved to") -> None:
+    """Write data to a JSON file."""
+    with open(output_json_path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    print(f"\n{msg} {output_json_path}")
+
 
 def json_handler(annotation_results: list, output_json_path: str, singular: bool = False):
     """
@@ -147,10 +155,8 @@ def json_handler(annotation_results: list, output_json_path: str, singular: bool
                     break
         if not replaced: 
             existing_data["annotations"].append(annotation_results[0])
-        
-    with open(output_json_path, "w") as f:
-        json.dump(existing_data if singular else annotation_results, f, indent=2, ensure_ascii=False)
-    print(f"\nResults saved to {output_json_path}")
+
+    write_to_json(existing_data if singular else annotation_results, output_json_path)
     
  
 def save_to_txt(output_json_path: str, output_txt_path: str, round: int = 0, verbose: bool = False): 
@@ -249,3 +255,98 @@ def handle_annotation_output(annotation_results: list, round: int, output_json_p
     """
     json_handler(annotation_results, output_json_path, singular=singular)
     save_to_txt(output_json_path, output_txt_path, round=round, verbose=verbose)
+
+
+########################################################################
+# IDEA FOR MULTIPLE ANNOTATIONS PER CALL 
+
+def multiple_annotation_handler(requests: list[AnnotationRequest], output_json_paths: list[str], output_txt_paths: list[str], final_out_json_path: str, verbose: bool = False) -> None:
+
+    # ensure that the right values are the same (and different) across the requests  
+    # examples and reannotate_round same
+    assert all(req.examples == requests[0].examples for req in requests), "All requests must have the same examples"
+    assert all(req.reannotate_round == requests[0].reannotate_round for req in requests), "All requests must have the same reannotate_round number"
+
+    # annotation_guideline and task_id different
+    assert len(set(req.annotation_guideline for req in requests)) == len(requests), "All requests must have different task IDs"
+    assert len(set(req.task_id for req in requests)) == len(requests), "All requests must have different task IDs"
+
+    # output paths different
+    assert len(set(output_json_paths)) == len(output_json_paths), "Output JSON paths must be unique"
+    assert len(set(output_txt_paths)) == len(output_txt_paths), "Output TXT paths must be unique"
+
+    # run the annotations for each request 
+    for i, request in enumerate(requests):
+        run_annotation(request, output_json_paths[i], output_txt_paths[i], singular=False, verbose=verbose)
+
+    labels = [req.task_id for req in requests]
+    output_json = {"labels": labels, "annotations": []}
+    to_keep = ["text_to_annotate", "uid", "cluster", "pca_x", "pca_y"] # only fields same across results 
+
+    first = True
+    for output_json_path in output_json_paths:
+        with open(output_json_path, "r") as f:
+            data = json.load(f)
+        for i, entry in enumerate(data.get("annotations", [])):
+            if first: 
+                to_add = {}
+            for key in entry:
+                if first:
+                    if key in to_keep:
+                        to_add[key] = entry[key]
+                    else: 
+                        to_add[key] = [entry[key]]
+                elif key not in to_keep:
+                    output_json["annotations"][i][key].append(entry[key])
+            if first:
+                output_json["annotations"].append(to_add)
+        first = False
+
+    # save output_json to final_out_json_path
+    write_to_json(output_json, final_out_json_path, msg="Combined results saved to")
+
+
+# for later steps in the iteration 
+def multiple_annotations_reannotate(request: AnnotationRequest, output_json_paths: list[str], output_txt_paths: list[str], final_out_json_path: str, singular: bool = False, verbose: bool = False):
+    # first, need to read final_out_json_path["labels"] to see which task id index corresponds to the request task id
+    with open(final_out_json_path, "r") as f:
+        data = json.load(f)
+    labels = data.get("labels", [])
+    if request.task_id not in labels:
+        raise ValueError(f"Task ID {request.task_id} not found in existing results. Cannot re-annotate.")
+    task_index = labels.index(request.task_id)
+
+    # then need to reannotate
+    run_annotation(request, output_json_paths[task_index], output_txt_paths[task_index], singular=singular, verbose=verbose)
+
+    # after that, need to update the final_out_json_path with the new annotation results
+    with open(final_out_json_path, "r") as f:
+        data = json.load(f)
+    with open(output_json_paths[task_index], "r") as f:
+        new_data = json.load(f)
+    found_uids = []
+
+    for i, entry in enumerate(data.get("annotations", [])):
+        found_uids.append(entry['uid'])
+        for key in entry:
+            if type(entry[key]) == list:
+                data["annotations"][i][key][task_index] = new_data["annotations"][i][key]
+
+    # if any annotations are new, find it and append it to the data key by key
+    if len(data["annotations"]) < len(new_data["annotations"]):
+        for i, entry in enumerate(new_data.get("annotations", [])):
+            if entry['uid'] not in found_uids:
+                to_add = {}
+                for key in entry:
+                    try:
+                        if type(data["annotations"][0][key]) == list:
+                            to_add[key] = len(output_json_paths) * [None]
+                            to_add[key][task_index] = new_data["annotations"][i][key]
+                        else:
+                            to_add[key] = new_data["annotations"][i][key]
+                    # throwing away keys like edge_case_pca_x
+                    except:
+                        continue
+                data["annotations"].append(to_add)
+
+    write_to_json(data, final_out_json_path, msg="Updated combined results saved to")
